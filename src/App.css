@@ -1,199 +1,270 @@
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  -webkit-tap-highlight-color: transparent;
-  user-select: none;
-}
-
-body, html, #root {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: #0c1017;
-  color: #f1f5f9;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
-
 #canvas-container {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 1;
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  touch-action: none;
 }
 
-/* Acciones flotantes */
+#fps-meter {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  background: rgba(15, 23, 42, 0.75);
+  color: #38bdf8;
+  font-family: monospace;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  pointer-events: none;
+  z-index: 10;
+}
+
 .top-actions {
-  position: absolute;
-  top: 14px;
-  right: 14px;
+  position: fixed;
+  top: 10px;
+  right: 10px;
   display: flex;
   gap: 8px;
-  z-index: 20;
+  z-index: 50;
 }
 
 .floating-btn {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  background: rgba(18, 24, 38, 0.94);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #f1f5f9;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
+  font-size: 16px;
   cursor: pointer;
-  font-size: 18px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
-.floating-btn:active {
-  transform: scale(0.92);
-}
-
-/* Panel flotante */
+/* PANEL TIPO SHEET EN LA PARTE INFERIOR PARA MÓVILES */
 .dock-panel {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  width: calc(100% - 24px);
-  max-width: 420px;
-  max-height: calc(100% - 24px);
-  background: rgba(18, 24, 38, 0.94);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
-  z-index: 10;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  max-height: 48vh;
+  background: rgba(15, 23, 42, 0.95);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 18px 18px 0 0;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
-  transition: transform 0.3s ease, opacity 0.3s ease;
-  overflow: hidden;
+  z-index: 40;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.6);
+  transition: transform 0.25s ease, opacity 0.25s ease;
 }
 
 .dock-panel.hidden {
-  transform: translateY(-20px) scale(0.96);
+  transform: translateY(100%);
   opacity: 0;
   pointer-events: none;
 }
 
 .panel-header {
-  padding: 12px 16px;
+  padding: 8px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
-.panel-body {
-  padding: 12px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.card-section {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 13px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.section-header {
-  padding: 10px 12px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.section-title {
-  font-size: 11px;
+.panel-header h3 {
+  margin: 0;
+  font-size: 13px;
   font-weight: 700;
-  text-transform: uppercase;
-  color: #94a3b8;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  color: #f8fafc;
 }
 
-.section-content {
-  padding: 11px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.btn-row {
+/* BARRA DE TABS / PESTAÑAS */
+.tabs-bar {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(4, 1fr);
+  background: rgba(30, 41, 59, 0.6);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 4px;
+  gap: 4px;
 }
 
-button, .file-label {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #f1f5f9;
-  border-radius: 9px;
-  padding: 8px 10px;
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  padding: 7px 2px;
   font-size: 11px;
   font-weight: 600;
+  border-radius: 8px;
   cursor: pointer;
-  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  transition: all 0.2s ease;
 }
 
-button:active {
-  transform: scale(0.97);
+.tab-btn.active {
+  background: #0284c7;
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(2, 132, 199, 0.4);
+}
+
+.tab-content {
+  padding: 10px 12px 14px 12px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.btn-primary, .btn-vrm, .btn-freeze, .btn-success, .btn-rebind {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #3b82f6, #06b6d4);
-  border: none;
+  background: #0284c7;
+  color: #fff;
 }
 
-.btn-active {
-  background: rgba(6, 182, 212, 0.25);
-  border-color: #06b6d4;
+.btn-vrm {
+  background: #7c3aed;
+  color: #fff;
 }
 
+.btn-freeze {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.btn-success {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+}
+
+.btn-rebind {
+  background: rgba(139, 92, 246, 0.2);
+  color: #c4b5fd;
+  border: 1px solid #8b5cf6;
+}
+
+/* BOTÓN VERDE FIJO Y DESTACADO */
+.btn-action-highlight {
+  background: linear-gradient(135deg, #10b981, #047857) !important;
+  color: #ffffff !important;
+  font-weight: bold !important;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.45);
+  border: 1px solid #34d399 !important;
+  padding: 11px 10px !important;
+  font-size: 13px !important;
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+  text-align: center;
+}
+
+.btn-row, .btn-row-4 {
+  display: grid;
+  gap: 6px;
+}
+
+.btn-row {
+  grid-template-columns: 1fr 1fr;
+}
+
+.btn-row-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.btn-row button, .btn-row-4 button {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+  padding: 8px 4px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+button.btn-active {
+  background: rgba(2, 132, 199, 0.35) !important;
+  border-color: #0284c7 !important;
+  color: #38bdf8 !important;
+}
+
+
+
+
+/* Carril de scroll táctil: los sliders ocupan el 72% y dejan el 28% derecho libre */
 .slider-group {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
+  width: 72%; /* Deja el lateral derecho vacío para apoyar el pulgar y scrollear */
 }
 
 .slider-header {
   display: flex;
   justify-content: space-between;
-  font-size: 10px;
-  color: #94a3b8;
-}
-
-input[type="range"] {
-  width: 100%;
-  accent-color: #06b6d4;
-}
-
-input[type="file"] {
-  display: none;
-}
-
-#fps-meter {
-  position: absolute;
-  bottom: 14px;
-  right: 14px;
-  background: rgba(18, 24, 38, 0.7);
-  padding: 5px 9px;
-  border-radius: 8px;
   font-size: 11px;
-  color: #06b6d4;
-  font-family: monospace;
-  z-index: 10;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
 }
+
+input[type=range] {
+  width: 100%;
+  accent-color: #0284c7;
+  height: 20px;
+  touch-action: pan-x; /* Solo responde al deslizamiento horizontal, no interfiere con el scroll vertical */
+}
+
+/* Área de contenido con margen de arrastre derecho garantizado */
+.tab-content {
+  padding: 10px 14px 20px 12px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+
+
+
+
+
+/* PANTALLAS GRANDES DE ESCRITORIO */
+@media (min-width: 641px) {
+  .dock-panel {
+    bottom: auto;
+    top: 12px;
+    left: 12px;
+    right: auto;
+    width: 330px;
+    max-height: 85vh;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+  }
+}
+
