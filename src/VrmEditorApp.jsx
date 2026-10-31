@@ -7,6 +7,7 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import eruda from 'eruda';
 import { Link } from 'react-router-dom';
 import BoneCalibratorPanel from './BoneCalibratorPanel';
+import ManualRigPanel from './ManualRigPanel';
 
 const VRM_BONE_MAP = {
   hips: 'hips',
@@ -122,6 +123,7 @@ function createBoneLabelSprite(text) {
 
 export default function VrmEditorApp() {
   const [showCalibrator, setShowCalibrator] = useState(false);
+  const [showManualRig, setShowManualRig] = useState(false);
 
   const containerRef = useRef(null);
   const vrmInputRef = useRef(null);
@@ -781,6 +783,21 @@ export default function VrmEditorApp() {
         >
           🛠️ Calibrar Hueso
         </button>
+
+        <button
+          onClick={() => setShowManualRig(!showManualRig)}
+          style={{
+            background: showManualRig ? '#10b981' : 'rgba(30, 41, 59, 0.85)',
+            color: '#fff',
+            padding: '7px 10px',
+            borderRadius: 8,
+            border: '1px solid #475569',
+            fontSize: 11,
+            cursor: 'pointer'
+          }}
+        >
+          🔥 Rig Manual
+        </button>
       </div>
 
       <div className="top-actions" style={{ position: 'absolute', top: 12, right: 12, zIndex: 100, display: 'flex', gap: 8 }}>
@@ -823,32 +840,6 @@ export default function VrmEditorApp() {
           {panelVisible ? '👁️' : '📋'}
         </button>
       </div>
-
-      <button
-        onClick={() => eruda.show()}
-        title="Configuración / Eruda"
-        style={{
-          position: 'absolute',
-          bottom: 20,
-          right: 16,
-          zIndex: 110,
-          width: 44,
-          height: 44,
-          borderRadius: 12,
-          background: 'rgba(30, 41, 59, 0.85)',
-          border: '1px solid #0284c7',
-          color: '#38bdf8',
-          fontSize: 20,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          cursor: 'pointer',
-          boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
-          backdropFilter: 'blur(6px)'
-        }}
-      >
-        ⚙️
-      </button>
 
       {panelVisible && (
         <div
@@ -1080,12 +1071,27 @@ export default function VrmEditorApp() {
         </div>
       )}
 
-      {showCalibrator && (
+      {/* PANELES FLOTANTES */}
+      {panelVisible && showCalibrator && (
         <BoneCalibratorPanel
           selectedBoneName={selectedBoneName}
           bonesMap={bonesMapRef.current}
           onUpdateOverlays={updateBoneOverlays}
           onClose={() => setShowCalibrator(false)}
+        />
+      )}
+
+      {/* ManualRigPanel permanece montado para conservar el modo térmico si se oculta con el ojo */}
+      {showManualRig && (
+        <ManualRigPanel
+          currentModel={currentModelRef.current}
+          bonesMap={bonesMapRef.current}
+          selectedBoneName={selectedBoneName}
+          onSelectBone={(name) => handleSelectBoneFromList(name)}
+          transformControls={transformControlsRef.current}
+          onUpdateOverlays={updateBoneOverlays}
+          onClose={() => setShowManualRig(false)}
+          visible={panelVisible}
         />
       )}
     </>
