@@ -586,6 +586,34 @@ export default function VrmEditorApp() {
       }
     });
 
+
+    // === REPORTE DE HORNEADO DE POSE T EN CONSOLA ERUDA ===
+    console.group('%c🔍 VERIFICACIÓN DE POSE T EN EXPORTACIÓN', 'color: #38bdf8; font-weight: bold; font-size: 13px;');
+    const armLeft = bonesMapRef.current['leftUpperArm'] || bonesMapRef.current['upperArm_L'];
+    const armRight = bonesMapRef.current['rightUpperArm'] || bonesMapRef.current['upperArm_R'];
+
+    const checkBoneBake = (bone, label) => {
+      if (!bone) {
+        console.warn(`⚠️ ${label}: Hueso no encontrado en el mapa.`);
+        return;
+      }
+      const rot = bone.rotation;
+      const isZeroRotation = Math.abs(rot.x) < 0.05 && Math.abs(rot.y) < 0.05 && Math.abs(rot.z) < 0.05;
+
+      if (isZeroRotation) {
+        console.log(`%c✅ ${label}: Pose T horneada correctamente (Rotación local neutra: [${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}])`, 'color: #10b981;');
+      } else {
+        console.warn(`%c⚠️ ${label}: El hueso conserva rotación local ([${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}]). Si no horneaste la pose, el modelo dependerá de esta inclinación.`, 'color: #f59e0b;');
+      }
+    };
+
+    checkBoneBake(armLeft, 'Brazo Izquierdo');
+    checkBoneBake(armRight, 'Brazo Derecho');
+    console.log('%cℹ️ Si ambos brazos muestran ✅ verde, la Pose T es la geometría física del archivo y no se restablecerá al editar dedos en el futuro.', 'color: #94a3b8;');
+    console.groupEnd();
+    // =======================================================
+
+
     const exporter = new GLTFExporter();
     exporter.parse(
       model,

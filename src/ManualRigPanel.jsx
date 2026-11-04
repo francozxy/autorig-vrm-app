@@ -12,17 +12,18 @@ export default function ManualRigPanel({
   onClose,
   visible = true
 }) {
-  const [paintMode, setPaintMode] = useState('inspect'); // 'add' | 'erase' | 'inspect'
+  const [paintMode, setPaintMode] = useState('inspect');
   const [brushSize, setBrushSize] = useState(8);
   const [brushStrength, setBrushStrength] = useState(50);
   const [undoCount, setUndoCount] = useState(0);
   const [isLocked, setIsLocked] = useState(false);
-  const [isEditMode, setIsEditMode] = useState(false); // Desacopla la malla para mover huesos libres
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [headScaleFactor, setHeadScaleFactor] = useState(1.0);
 
   const origMaterialsMapRef = useRef(new Map());
   const initialWeightsMapRef = useRef(new Map());
   const initialBoneTransformsRef = useRef(new Map());
-  const disconnectedSkeletonsRef = useRef(new Map()); // Guarda la referencia de esqueletos desconectados
+  const disconnectedSkeletonsRef = useRef(new Map());
   const undoStackRef = useRef([]);
 
   const cursorMeshRef = useRef(null);
@@ -58,7 +59,6 @@ export default function ManualRigPanel({
   const getSceneContext = () => {
     let scene = null;
     let camera = null;
-
     if (currentModel) {
       currentModel.traverseAncestors((p) => {
         if (p.type === 'Scene') scene = p;
@@ -70,34 +70,145 @@ export default function ManualRigPanel({
     return { scene, camera };
   };
 
-  // 1. Alternar Modo Edición: Desconectar esqueleto de la piel para mover huesos sin deformar
+  const pushUndoSnapshot = () => {
+    const meshes = getSkinnedMeshes();
+    if (!meshes.length) return;
+
+    const snapshot = meshes.map((m) => ({
+      uuid: m.uuid,
+      skinIndex: m.geometry.attributes.skinIndex.array.slice(),
+      skinWeight: m.geometry.attributes.skinWeight.array.slice(),
+      position: m.geometry.attributes.position.array.slice()
+    }));
+
+    undoStackRef.current.push(snapshot);
+    if (undoStackRef.current.length > 25) undoStackRef.current.shift();
+    setUndoCount(undoStackRef.current.length);
+  };
+
+  const handleUndo = () => {
+    if (!undoStackRef.current.length) return;
+    const prev = undoStackRef.current.pop();
+    setUndoCount(undoStackRef.current.length);
+
+    const meshes = getSkinnedMeshes();
+    meshes.forEach((m) => {
+      const saved = prev.find((s) => s.uuid === m.uuid);
+      if (saved) {
+        const p = m.geometry.attributes.position;
+        const si = m.geometry.attributes.skinIndex;
+        const sw = m.geometry.attributes.skinWeight;
+        if (saved.position) p.array.set(saved.position);
+        si.array.set(saved.skinIndex);
+        sw.array.set(saved.skinWeight);
+        p.needsUpdate = true;
+        si.needsUpdate = true;
+        sw.needsUpdate = true;
+
+        const skel = m.skeleton || disconnectedSkeletonsRef.current.get(m.uuid);
+        if (selectedBoneNameRef.current && skel && skel.bones) {
+          const bIdx = skel.bones.findIndex((b) => b.name === selectedBoneNameRef.current);
+          if (bIdx !== -1) updateHeat(m, bIdx);
+        }
+      }
+    });
+
+    if (onUpdateOverlays) onUpdateOverlays();
+  };
+
+  // ESCALADO DE CABEZA DIRECTO EN VERTICES (SIN AFECTAR EL HUESO)
+  const applyHeadScale = (scaleMultiplier) => {
+    const meshes = getSkinnedMeshes();
+    const headBone = bonesMap?.head || bonesMap?.J_Bip_C_Head;
+
+    if (!meshes.length || !headBone) {
+      alert('No se encontró el hueso de la cabeza (head).');
+      return;
+    }
+
+    pushUndoSnapshot();
+
+    const headWorldPos = new THREE.Vector3();
+    headBone.getWorldPosition(headWorldPos);
+
+    const vertWorldPos = new THREE.Vector3();
+    const tempDir = new THREE.Vector3();
+
+    meshes.forEach((mesh) => {
+      if (!mesh.geometry) return;
+
+      mesh.updateMatrixWorld(true);
+      const posAttr = mesh.geometry.attributes.position;
+      const siAttr = mesh.geometry.attributes.skinIndex;
+      const swAttr = mesh.geometry.attributes.skinWeight;
+      const skel = mesh.skeleton || disconnectedSkeletonsRef.current.get(mesh.uuid);
+      if (!skel) return;
+
+      const headIdx = skel.bones.indexOf(headBone);
+      if (headIdx === -1) return;
+
+      const count = posAttr.count;
+
+      for (let i = 0; i < count; i++) {
+        // Buscar el peso que este vértice tiene respecto a la cabeza
+        let headWeight = 0;
+        for (let j = 0; j < 4; j++) {
+          if (siAttr.getComponent(i, j) === headIdx) {
+            headWeight = swAttr.getComponent(i, j);
+            break;
+          }
+        }
+
+        if (headWeight > 0.1) {
+          vertWorldPos.fromBufferAttribute(posAttr, i);
+          vertWorldPos.applyMatrix4(mesh.matrixWorld);
+
+          // Escalar desde el punto central del hueso de la cabeza
+          tempDir.subVectors(vertWorldPos, headWorldPos);
+          const effectiveScale = 1.0 + (scaleMultiplier - 1.0) * headWeight;
+          tempDir.multiplyScalar(effectiveScale);
+          vertWorldPos.copy(headWorldPos).add(tempDir);
+
+          mesh.worldToLocal(vertWorldPos);
+          posAttr.setXYZ(i, vertWorldPos.x, vertWorldPos.y, vertWorldPos.z);
+        }
+      }
+
+      posAttr.needsUpdate = true;
+      mesh.geometry.computeVertexNormals();
+      mesh.geometry.computeBoundingBox();
+      mesh.geometry.computeBoundingSphere();
+    });
+
+    computeWP(meshes);
+    if (onUpdateOverlays) onUpdateOverlays();
+    alert(`✅ Escala de cabeza ajustada a ${(scaleMultiplier * 100).toFixed(0)}% sin alterar los huesos.`);
+  };
+
+  // 1. Alternar Modo Edición para desacoplar esqueleto
   const toggleEditMode = () => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length) return;
 
     if (!isEditMode) {
-      // ENTRAR A MODO EDICIÓN: Desacopla temporalmente el skeleton
       meshes.forEach((m) => {
         if (m.skeleton) {
           disconnectedSkeletonsRef.current.set(m.uuid, m.skeleton);
-          m.skeleton = null; // Al ser null, la malla NO reacciona a los movimientos de los huesos
+          m.skeleton = null;
         }
       });
       setIsEditMode(true);
-      setIsLocked(false); // Habilita el gizmo
+      setIsLocked(false);
     } else {
-      // SALIR DE MODO EDICIÓN SIN GUARDAR
       meshes.forEach((m) => {
         const skel = disconnectedSkeletonsRef.current.get(m.uuid);
-        if (skel) {
-          m.skeleton = skel;
-        }
+        if (skel) m.skeleton = skel;
       });
       setIsEditMode(false);
     }
   };
 
-  // 2. FIJAR NUEVA POSICIÓN DE HUESOS (NUEVO BIND SIN REVERTIR LA MALLA)
+  // 2. Fijar nuevos puntos de articulación sin revertir piel
   const handleApplyNewBonePositions = () => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length) return;
@@ -105,22 +216,18 @@ export default function ManualRigPanel({
     pushUndoSnapshot();
 
     meshes.forEach((mesh) => {
-      // Recuperar skeleton si estaba en modo edición
-      let skel = mesh.skeleton || disconnectedSkeletonsRef.current.get(mesh.uuid);
+      const skel = mesh.skeleton || disconnectedSkeletonsRef.current.get(mesh.uuid);
       if (!skel) return;
 
       mesh.skeleton = skel;
 
-      // Actualizar matrices mundiales de los huesos en su nueva posición
       mesh.skeleton.bones.forEach((bone) => {
         bone.updateMatrixWorld(true);
       });
 
-      // Recalcular inverses para que la nueva posición sea el punto de reposo neutro (0 deformación)
       mesh.skeleton.calculateInverses();
       mesh.bind(mesh.skeleton, mesh.matrixWorld);
 
-      // Normalizar pesos
       const sw = mesh.geometry.attributes.skinWeight;
       if (sw) {
         const count = sw.count;
@@ -143,10 +250,77 @@ export default function ManualRigPanel({
     setIsEditMode(false);
     computeWP(meshes);
     if (onUpdateOverlays) onUpdateOverlays();
-    alert('🔒 ¡Huesos fijados con éxito! La nueva posición ya es parte de la malla sin deformarla.');
+    alert('🔒 ¡Huesos fijados con éxito! Poses y matrices actualizadas.');
   };
 
-  // Cursor 3D y respaldo de transformaciones iniciales
+  // Horneado CPU para asegurar Pose T permanente
+  const handleBakeCurrentPoseToMesh = () => {
+    const meshes = getSkinnedMeshes();
+    if (!meshes.length || !bonesMap) {
+      alert('No hay mallas o esqueleto activo para hornear.');
+      return;
+    }
+
+    pushUndoSnapshot();
+
+    const tempVertex = new THREE.Vector3();
+    const skinnedVertex = new THREE.Vector3();
+    const boneMatrix = new THREE.Matrix4();
+
+    meshes.forEach((mesh) => {
+      const skel = mesh.skeleton || disconnectedSkeletonsRef.current.get(mesh.uuid);
+      if (!mesh.geometry || !skel) return;
+
+      mesh.skeleton = skel;
+      mesh.updateMatrixWorld(true);
+      mesh.skeleton.update();
+
+      const geometry = mesh.geometry;
+      const posAttr = geometry.attributes.position;
+      const siAttr = geometry.attributes.skinIndex;
+      const swAttr = geometry.attributes.skinWeight;
+      const bones = mesh.skeleton.bones;
+      const boneInverses = mesh.skeleton.boneInverses;
+      const count = posAttr.count;
+
+      for (let i = 0; i < count; i++) {
+        tempVertex.fromBufferAttribute(posAttr, i);
+        skinnedVertex.set(0, 0, 0);
+
+        for (let j = 0; j < 4; j++) {
+          const weight = swAttr.getComponent(i, j);
+          if (weight > 0.0001) {
+            const boneIndex = siAttr.getComponent(i, j);
+            boneMatrix.multiplyMatrices(bones[boneIndex].matrixWorld, boneInverses[boneIndex]);
+            const temp = tempVertex.clone().applyMatrix4(boneMatrix);
+            skinnedVertex.add(temp.multiplyScalar(weight));
+          }
+        }
+
+        mesh.worldToLocal(skinnedVertex);
+        posAttr.setXYZ(i, skinnedVertex.x, skinnedVertex.y, skinnedVertex.z);
+      }
+
+      posAttr.needsUpdate = true;
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+
+      bones.forEach((bone) => {
+        bone.rotation.set(0, 0, 0);
+        bone.updateMatrixWorld(true);
+      });
+
+      mesh.skeleton.calculateInverses();
+      mesh.bind(mesh.skeleton, mesh.matrixWorld);
+    });
+
+    computeWP(meshes);
+    if (onUpdateOverlays) onUpdateOverlays();
+    alert('🔥 ¡Pose T horneada en la malla! Ahora la Pose T es la geometría base permanente.');
+  };
+
+  // Cursor 3D
   useEffect(() => {
     const { scene } = getSceneContext();
     if (scene && !cursorMeshRef.current) {
@@ -191,7 +365,7 @@ export default function ManualRigPanel({
     }
   }, [brushSize]);
 
-  // Manejo de materiales térmicos
+  // Materiales térmicos
   useEffect(() => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length) return;
@@ -230,7 +404,6 @@ export default function ManualRigPanel({
         if (m.geometry && m.geometry.attributes.color) {
           m.geometry.deleteAttribute('color');
         }
-        // Reconectar si quedó desconectado
         const skel = disconnectedSkeletonsRef.current.get(m.uuid);
         if (skel) m.skeleton = skel;
       });
@@ -238,7 +411,7 @@ export default function ManualRigPanel({
     };
   }, [selectedBoneName, currentModel, isEditMode]);
 
-  // Conexión del gizmo según modo
+  // Gizmo
   useEffect(() => {
     if (transformControls) {
       if (isLocked || (paintMode !== 'inspect' && !isEditMode)) {
@@ -249,88 +422,7 @@ export default function ManualRigPanel({
     }
   }, [isLocked, paintMode, selectedBoneName, bonesMap, transformControls, isEditMode]);
 
-  const pushUndoSnapshot = () => {
-    const meshes = getSkinnedMeshes();
-    if (!meshes.length) return;
-
-    const snapshot = meshes.map((m) => ({
-      uuid: m.uuid,
-      skinIndex: m.geometry.attributes.skinIndex.array.slice(),
-      skinWeight: m.geometry.attributes.skinWeight.array.slice()
-    }));
-
-    undoStackRef.current.push(snapshot);
-    if (undoStackRef.current.length > 25) undoStackRef.current.shift();
-    setUndoCount(undoStackRef.current.length);
-  };
-
-  const handleUndo = () => {
-    if (!undoStackRef.current.length) return;
-    const prev = undoStackRef.current.pop();
-    setUndoCount(undoStackRef.current.length);
-
-    const meshes = getSkinnedMeshes();
-    meshes.forEach((m) => {
-      const saved = prev.find((s) => s.uuid === m.uuid);
-      if (saved) {
-        const si = m.geometry.attributes.skinIndex;
-        const sw = m.geometry.attributes.skinWeight;
-        si.array.set(saved.skinIndex);
-        sw.array.set(saved.skinWeight);
-        si.needsUpdate = true;
-        sw.needsUpdate = true;
-
-        const skel = m.skeleton || disconnectedSkeletonsRef.current.get(m.uuid);
-        if (selectedBoneNameRef.current && skel && skel.bones) {
-          const bIdx = skel.bones.findIndex((b) => b.name === selectedBoneNameRef.current);
-          if (bIdx !== -1) updateHeat(m, bIdx);
-        }
-      }
-    });
-
-    if (onUpdateOverlays) onUpdateOverlays();
-  };
-
-  const handleResetEverything = () => {
-    if (!window.confirm('¿Restablecer las posiciones de todos los huesos y los pesos originales?')) return;
-
-    pushUndoSnapshot();
-
-    if (bonesMap) {
-      initialBoneTransformsRef.current.forEach((saved, name) => {
-        const bone = bonesMap[name];
-        if (bone) {
-          bone.position.copy(saved.pos);
-          bone.rotation.copy(saved.rot);
-          bone.updateMatrixWorld(true);
-        }
-      });
-    }
-
-    const meshes = getSkinnedMeshes();
-    meshes.forEach((m) => {
-      const init = initialWeightsMapRef.current.get(m.uuid);
-      if (init) {
-        const si = m.geometry.attributes.skinIndex;
-        const sw = m.geometry.attributes.skinWeight;
-        si.array.set(init.skinIndex);
-        sw.array.set(init.skinWeight);
-        si.needsUpdate = true;
-        sw.needsUpdate = true;
-
-        const skel = m.skeleton || disconnectedSkeletonsRef.current.get(m.uuid);
-        if (selectedBoneNameRef.current && skel && skel.bones) {
-          const bIdx = skel.bones.findIndex((b) => b.name === selectedBoneNameRef.current);
-          if (bIdx !== -1) updateHeat(m, bIdx);
-        }
-      }
-    });
-
-    if (onUpdateOverlays) onUpdateOverlays();
-    alert('✅ Modelo restablecido al estado original de carga.');
-  };
-
-  // Pintado táctil y con ratón
+  // Pintado
   useEffect(() => {
     const canvas = document.querySelector('canvas');
     if (!canvas) return;
@@ -510,7 +602,7 @@ export default function ManualRigPanel({
         position: 'absolute',
         top: 60,
         left: 12,
-        width: 305,
+        width: 310,
         background: 'rgba(15, 23, 42, 0.95)',
         border: isEditMode ? '2px solid #f59e0b' : '1px solid #10b981',
         borderRadius: 12,
@@ -524,7 +616,7 @@ export default function ManualRigPanel({
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, borderBottom: '1px solid #334155', paddingBottom: 6 }}>
         <span style={{ fontWeight: 'bold', color: isEditMode ? '#fbbf24' : '#34d399' }}>
-          {isEditMode ? '🦴 MODO EDICIÓN HUESOS (Malla Libre)' : '🔥 Rig Manual & Pincel'}
+          {isEditMode ? '🦴 MODO EDICIÓN HUESOS' : '🔥 Rig Manual & Pincel'}
         </span>
         <button
           onClick={onClose}
@@ -535,7 +627,7 @@ export default function ManualRigPanel({
         </button>
       </div>
 
-      {/* Indicador de hueso y Candado contra movimiento */}
+      {/* Indicador de hueso y Candado */}
       <div style={{ marginBottom: 8, background: '#1e293b', padding: '6px 8px', borderRadius: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '65%' }}>
           <span style={{ color: '#94a3b8' }}>Hueso: </span>
@@ -600,6 +692,75 @@ export default function ManualRigPanel({
         </button>
       </div>
 
+      {/* CONTROL DE TAMAÑO DE CABEZA INDEPENDIENTE */}
+      <div style={{ marginBottom: 8, padding: 6, background: '#1e293b', borderRadius: 8, border: '1px solid #475569' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span style={{ color: '#cbd5e1', fontWeight: 'bold' }}>👤 Tamaño Cabeza (Vértices):</span>
+          <span style={{ color: '#38bdf8' }}>{(headScaleFactor * 100).toFixed(0)}%</span>
+        </div>
+        <input
+          type="range"
+          min="0.7"
+          max="1.3"
+          step="0.02"
+          value={headScaleFactor}
+          onChange={(e) => setHeadScaleFactor(Number(e.target.value))}
+          style={{ width: '100%', accentColor: '#38bdf8' }}
+        />
+        <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+          <button
+            onClick={() => applyHeadScale(headScaleFactor)}
+            style={{
+              flex: 1,
+              background: '#0284c7',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 4,
+              padding: '5px',
+              fontWeight: 'bold',
+              cursor: 'pointer'
+            }}
+          >
+            Ajustar Cabeza
+          </button>
+          <button
+            onClick={() => {
+              setHeadScaleFactor(1.0);
+              applyHeadScale(1.0);
+            }}
+            style={{
+              background: '#334155',
+              color: '#94a3b8',
+              border: 'none',
+              borderRadius: 4,
+              padding: '5px 8px',
+              cursor: 'pointer'
+            }}
+          >
+            100%
+          </button>
+        </div>
+      </div>
+
+      {/* BOTÓN HORNEADO CPU DE POSE T */}
+      <button
+        onClick={handleBakeCurrentPoseToMesh}
+        style={{
+          width: '100%',
+          background: 'linear-gradient(135deg, #0284c7, #0369a1)',
+          color: '#fff',
+          border: 'none',
+          borderRadius: 6,
+          padding: '8px',
+          fontWeight: 'bold',
+          marginBottom: 8,
+          cursor: 'pointer'
+        }}
+        title="Hornea la pose T directamente en la geometría"
+      >
+        ❄️ Hornear Pose T Permanente
+      </button>
+
       {/* Selector de modo Pincel / Ver */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         <button
@@ -660,13 +821,13 @@ export default function ManualRigPanel({
         </button>
       </div>
 
-      {/* Botones Deshacer y Restablecer */}
+      {/* Deshacer */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         <button
           onClick={handleUndo}
           disabled={undoCount === 0}
           style={{
-            flex: 1,
+            width: '100%',
             background: undoCount > 0 ? '#3b82f6' : '#1e293b',
             color: '#fff',
             border: '1px solid #475569',
@@ -678,21 +839,6 @@ export default function ManualRigPanel({
           }}
         >
           ↩️ Deshacer ({undoCount})
-        </button>
-        <button
-          onClick={handleResetEverything}
-          style={{
-            flex: 1,
-            background: '#334155',
-            color: '#f87171',
-            border: '1px solid #ef4444',
-            borderRadius: 6,
-            padding: '6px 4px',
-            cursor: 'pointer',
-            fontWeight: 'bold'
-          }}
-        >
-          🔄 Restablecer Todo
         </button>
       </div>
 
@@ -724,11 +870,6 @@ export default function ManualRigPanel({
           onChange={(e) => setBrushStrength(Number(e.target.value))}
           style={{ width: '100%', accentColor: '#10b981' }}
         />
-      </div>
-
-      <div style={{ fontSize: 9.5, color: '#94a3b8', background: '#0f172a', padding: 6, borderRadius: 6, border: '1px solid #334155', lineHeight: 1.4 }}>
-        1. Toca <b>🦴 Desacoplar Malla</b>: ahora puedes mover cualquier hueso (brazos o dedos) sin que la piel se estire o deforme[span_4](start_span)[span_4](end_span)[span_5](start_span)[span_5](end_span).<br />
-        2. Al terminar de calzarlos en la carne, presiona <b>🔒 Fijar Huesos a Malla</b> para hornear la nueva posición sin que se restablezca nada.
       </div>
     </div>
   );
