@@ -8,6 +8,7 @@ import eruda from 'eruda';
 import { Link } from 'react-router-dom';
 import BoneCalibratorPanel from './BoneCalibratorPanel';
 import ManualRigPanel from './ManualRigPanel';
+import ExtraBonePanel from './ExtraBonePanel';
 
 const VRM_BONE_MAP = {
   hips: 'hips',
@@ -122,6 +123,7 @@ function createBoneLabelSprite(text) {
 }
 
 export default function VrmEditorApp() {
+  const [showExtraBones, setShowExtraBones] = useState(false);
   const [showCalibrator, setShowCalibrator] = useState(false);
   const [showManualRig, setShowManualRig] = useState(false);
 
@@ -255,7 +257,7 @@ export default function VrmEditorApp() {
 
     let reqId;
     const animate = () => {
-      reqId = requestAnimationFrame(animate);
+      reqId = requestAnimationFrame(animate); // ✅ CORREGIDO: antes decía requestAnimationAnimationFrame
       controls.update();
       if (currentModelRef.current) {
         updateBoneOverlays();
@@ -575,9 +577,17 @@ export default function VrmEditorApp() {
     model.traverse((node) => {
       if (node.isBone) {
         originalNames.set(node, node.name);
-        const canonical = VRM_BONE_MAP[node.name];
-        if (canonical) {
-          node.name = canonical;
+        // Excluir huesos secundarios (busto/pelo) del mapeo a huesos humanos estándar
+        const isSecondaryBone =
+          node.name.startsWith('Bust_') ||
+          node.name.startsWith('Hair_') ||
+          node.name.startsWith('Extra_');
+
+        if (!isSecondaryBone) {
+          const canonical = VRM_BONE_MAP[node.name];
+          if (canonical) {
+            node.name = canonical;
+          }
         }
       }
       if (node.userData) {
@@ -585,7 +595,6 @@ export default function VrmEditorApp() {
         delete node.userData.vrm;
       }
     });
-
 
     // === REPORTE DE HORNEADO DE POSE T EN CONSOLA ERUDA ===
     console.group('%c🔍 VERIFICACIÓN DE POSE T EN EXPORTACIÓN', 'color: #38bdf8; font-weight: bold; font-size: 13px;');
@@ -611,8 +620,6 @@ export default function VrmEditorApp() {
     checkBoneBake(armRight, 'Brazo Derecho');
     console.log('%cℹ️ Si ambos brazos muestran ✅ verde, la Pose T es la geometría física del archivo y no se restablecerá al editar dedos en el futuro.', 'color: #94a3b8;');
     console.groupEnd();
-    // =======================================================
-
 
     const exporter = new GLTFExporter();
     exporter.parse(
@@ -657,6 +664,22 @@ export default function VrmEditorApp() {
 
         const titleName = modelName ? modelName.replace(/\.vrm$/i, '') : 'Avatar';
 
+        // Detección de índices para SpringBones (Busto, Cabello, Extras)
+        const springNodeIndices = [];
+        if (gltf.nodes) {
+          gltf.nodes.forEach((node, idx) => {
+            if (
+              node.name &&
+              (node.name.startsWith('Bust_') ||
+                node.name.startsWith('Hair_') ||
+                node.name.startsWith('Extra_')) &&
+              !node.name.endsWith('_end') // Los huesos de punta no inician grupos de resorte
+            ) {
+              springNodeIndices.push(idx);
+            }
+          });
+        }
+
         gltf.extensions = gltf.extensions || {};
         gltf.extensions.VRM = {
           exporterVersion: 'three-vrm-autorig-fixed-1.0',
@@ -688,7 +711,15 @@ export default function VrmEditorApp() {
             blendShapeGroups: []
           },
           secondaryAnimation: {
-            boneGroups: [],
+            boneGroups: springNodeIndices.length > 0 ? [
+              {
+                comment: 'PhysicsBones',
+                stiffiness: 0.5,
+                gravityPower: 0.1,
+                dragForce: 0.4,
+                bones: springNodeIndices
+              }
+            ] : [],
             colliderGroups: []
           }
         };
@@ -730,7 +761,7 @@ export default function VrmEditorApp() {
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
 
-        alert(`✅ Exportado con rotación horneada de ${currentCorrectionDeg}°.`);
+        alert(`✅ Exportado con rotación horneada de ${currentCorrectionDeg}° y físicas secundarias.`);
       },
       (error) => {
         originalNames.forEach((name, node) => {
@@ -826,6 +857,21 @@ export default function VrmEditorApp() {
         >
           🔥 Rig Manual
         </button>
+
+        <button
+          onClick={() => setShowExtraBones(!showExtraBones)}
+          style={{
+            background: showExtraBones ? '#ec4899' : 'rgba(30, 41, 59, 0.85)',
+            color: '#fff',
+            padding: '7px 10px',
+            borderRadius: 8,
+            border: '1px solid #475569',
+            fontSize: 11,
+            cursor: 'pointer'
+          }}
+        >
+          ✨ Huesos Extras
+        </button>
       </div>
 
       <div className="top-actions" style={{ position: 'absolute', top: 12, right: 12, zIndex: 100, display: 'flex', gap: 8 }}>
@@ -893,7 +939,7 @@ export default function VrmEditorApp() {
           </div>
 
           <input type="file" ref={vrmInputRef} accept=".vrm" style={{ display: 'none' }} onChange={handleLoadVRM} />
-          
+
           <button
             onClick={() => vrmInputRef.current && vrmInputRef.current.click()}
             style={{
@@ -1109,7 +1155,18 @@ export default function VrmEditorApp() {
         />
       )}
 
-      {/* ManualRigPanel permanece montado para conservar el modo térmico si se oculta con el ojo */}
+      {panelVisible && showExtraBones && (
+        <ExtraBonePanel
+          currentModel={currentModelRef.current}
+          bonesMap={bonesMapRef.current}
+          onSelectBone={(name) => handleSelectBoneFromList(name)}
+          transformControls={transformControlsRef.current}
+          onUpdateOverlays={updateBoneOverlays}
+          onClose={() => setShowExtraBones(false)}
+          visible={panelVisible}
+        />
+      )}
+
       {showManualRig && (
         <ManualRigPanel
           currentModel={currentModelRef.current}

@@ -150,7 +150,6 @@ export default function ManualRigPanel({
       const count = posAttr.count;
 
       for (let i = 0; i < count; i++) {
-        // Buscar el peso que este vértice tiene respecto a la cabeza
         let headWeight = 0;
         for (let j = 0; j < 4; j++) {
           if (siAttr.getComponent(i, j) === headIdx) {
@@ -163,7 +162,6 @@ export default function ManualRigPanel({
           vertWorldPos.fromBufferAttribute(posAttr, i);
           vertWorldPos.applyMatrix4(mesh.matrixWorld);
 
-          // Escalar desde el punto central del hueso de la cabeza
           tempDir.subVectors(vertWorldPos, headWorldPos);
           const effectiveScale = 1.0 + (scaleMultiplier - 1.0) * headWeight;
           tempDir.multiplyScalar(effectiveScale);
@@ -175,9 +173,9 @@ export default function ManualRigPanel({
       }
 
       posAttr.needsUpdate = true;
-      mesh.geometry.computeVertexNormals();
-      mesh.geometry.computeBoundingBox();
-      mesh.geometry.computeBoundingSphere();
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
     });
 
     computeWP(meshes);
@@ -253,7 +251,7 @@ export default function ManualRigPanel({
     alert('🔒 ¡Huesos fijados con éxito! Poses y matrices actualizadas.');
   };
 
-  // Horneado CPU para asegurar Pose T permanente
+  // 3. HORNEADO DE POSE T MANTENIENDO LOS HUESOS ALINEADOS (SIN QUE SE CAIGAN)
   const handleBakeCurrentPoseToMesh = () => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length || !bonesMap) {
@@ -283,6 +281,7 @@ export default function ManualRigPanel({
       const boneInverses = mesh.skeleton.boneInverses;
       const count = posAttr.count;
 
+      // 1. Hornear las coordenadas de los vértices en su postura actual
       for (let i = 0; i < count; i++) {
         tempVertex.fromBufferAttribute(posAttr, i);
         skinnedVertex.set(0, 0, 0);
@@ -306,18 +305,19 @@ export default function ManualRigPanel({
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
 
+      // 2. Conservar la posición de los huesos (NO hacer bone.rotation.set(0,0,0))
       bones.forEach((bone) => {
-        bone.rotation.set(0, 0, 0);
         bone.updateMatrixWorld(true);
       });
 
+      // 3. Fijar la postura actual de los huesos como nueva base de reposo estática
       mesh.skeleton.calculateInverses();
       mesh.bind(mesh.skeleton, mesh.matrixWorld);
     });
 
     computeWP(meshes);
     if (onUpdateOverlays) onUpdateOverlays();
-    alert('🔥 ¡Pose T horneada en la malla! Ahora la Pose T es la geometría base permanente.');
+    alert('🔥 ¡Pose T horneada! La malla y los huesos quedaron fijados y alineados.');
   };
 
   // Cursor 3D
@@ -742,7 +742,7 @@ export default function ManualRigPanel({
         </div>
       </div>
 
-      {/* BOTÓN HORNEADO CPU DE POSE T */}
+      {/* BOTÓN HORNEADO CPU DE POSE T (Mantiene brazos y huesos en su sitio) */}
       <button
         onClick={handleBakeCurrentPoseToMesh}
         style={{
@@ -756,7 +756,7 @@ export default function ManualRigPanel({
           marginBottom: 8,
           cursor: 'pointer'
         }}
-        title="Hornea la pose T directamente en la geometría"
+        title="Hornea la pose T directamente en la geometría y alinea los huesos"
       >
         ❄️ Hornear Pose T Permanente
       </button>
