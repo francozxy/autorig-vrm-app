@@ -123,9 +123,23 @@ function createBoneLabelSprite(text) {
 }
 
 export default function VrmEditorApp() {
+  const globalUndoStackRef = useRef([]);
+  const [globalUndoCount, setGlobalUndoCount] = useState(0);
+
   const [showExtraBones, setShowExtraBones] = useState(false);
   const [showCalibrator, setShowCalibrator] = useState(false);
   const [showManualRig, setShowManualRig] = useState(false);
+
+  const [testPhysicsActive, setTestPhysicsActive] = useState(false);
+  const testPhysicsActiveRef = useRef(false);
+  const springSimDataRef = useRef(new Map());
+  const baseRestRotationsRef = useRef(new Map());
+
+  // Sistema de múltiples colisionadores
+  const [showColliders, setShowColliders] = useState(false);
+  const collidersGroupRef = useRef(new THREE.Group());
+  const [selectedColliderName, setSelectedColliderName] = useState('');
+  const [colliderList, setColliderList] = useState([]);
 
   const containerRef = useRef(null);
   const vrmInputRef = useRef(null);
@@ -150,6 +164,10 @@ export default function VrmEditorApp() {
 
   const [activeMaterialMode, setActiveMaterialMode] = useState('standard');
   const originalMaterialsCacheRef = useRef(new Map());
+
+  useEffect(() => {
+    testPhysicsActiveRef.current = testPhysicsActive;
+  }, [testPhysicsActive]);
 
   const updateBoneOverlays = () => {
     const tempPos = new THREE.Vector3();
@@ -198,6 +216,7 @@ export default function VrmEditorApp() {
 
     scene.add(boneMarkersGroupRef.current);
     scene.add(boneLabelsGroupRef.current);
+    scene.add(collidersGroupRef.current);
 
     const transform = new TransformControls(camera, renderer.domElement);
     transform.setMode('rotate');
@@ -224,7 +243,7 @@ export default function VrmEditorApp() {
 
     const arrowHelper = new THREE.ArrowHelper(
       new THREE.Vector3(0, 0, 1),
-      new THREE.Vector3(0, 0.01, -0.6),
+      new THREE.Vector3(0, 0, 0.01),
       1.6,
       0x38bdf8,
       0.28,
@@ -238,27 +257,102 @@ export default function VrmEditorApp() {
     const onPointerDown = (event) => {
       if (event.target.tagName !== 'CANVAS') return;
       if (transform.dragging) return;
-      if (!boneMarkersGroupRef.current.visible) return;
 
       mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
       mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
+
+      // Selección táctil directa de colisionadores
+      if (collidersGroupRef.current.visible) {
+        const collHits = raycaster.intersectObjects(collidersGroupRef.current.children, true);
+        if (collHits.length > 0) {
+          const hitColl = collHits[0].object;
+          selectColliderByName(hitColl.name);
+          return;
+        }
+      }
+
+      if (!boneMarkersGroupRef.current.visible) return;
 
       const intersects = raycaster.intersectObjects(boneMarkersGroupRef.current.children, false);
       if (intersects.length > 0) {
         const hitMarker = intersects[0].object;
         const clickedBone = hitMarker.userData.bone;
         if (clickedBone) {
+          setSelectedColliderName('');
           selectBoneByObject(clickedBone);
         }
       }
     };
     window.addEventListener('pointerdown', onPointerDown);
 
+    const clock = new THREE.Clock();
     let reqId;
+
     const animate = () => {
-      reqId = requestAnimationFrame(animate); // ✅ CORREGIDO: antes decía requestAnimationAnimationFrame
+      reqId = requestAnimationFrame(animate);
+      const delta = Math.min(clock.getDelta(), 0.1);
+      const time = clock.getElapsedTime();
+
       controls.update();
+
+      // SIMULADOR DE FÍSICA EN VIVO
+      if (testPhysicsActiveRef.current && currentModelRef.current && bonesMapRef.current) {
+        const hasBustBones = Boolean(
+          bonesMapRef.current['Bust_L'] || bonesMapRef.current['Bust_R']
+        );
+
+        Object.keys(bonesMapRef.current).forEach((bName) => {
+          const isHair = bName.startsWith('Hair_');
+          const isBust = hasBustBones && bName.startsWith('Bust_');
+
+          if ((isHair || isBust) && !bName.endsWith('_end')) {
+            const bone = bonesMapRef.current[bName];
+            if (!bone) return;
+
+            if (!springSimDataRef.current.has(bName)) {
+              springSimDataRef.current.set(bName, { velX: 0, velZ: 0, rotX: 0, rotZ: 0 });
+            }
+            const sim = springSimDataRef.current.get(bName);
+            const restRot = baseRestRotationsRef.current.get(bName) || { x: 0, z: 0 };
+
+            let targetOffsetRotX = 0;
+            let targetOffsetRotZ = 0;
+            let springStrength = 14.0;
+            let damping = 0.86;
+
+            if (isHair) {
+              targetOffsetRotX = -Math.sin(time * 4.5) * 0.18;
+              targetOffsetRotZ = -Math.cos(time * 3.2) * 0.12;
+              springStrength = 13.0;
+              damping = 0.86;
+            } else if (isBust) {
+              targetOffsetRotX = Math.sin(time * 6.0) * 0.28;
+              targetOffsetRotZ = Math.cos(time * 4.5) * (bName.includes('_L') ? -0.10 : 0.10);
+              springStrength = 18.0;
+              damping = 0.80;
+            }
+
+            sim.velX += (targetOffsetRotX - sim.rotX) * springStrength * delta;
+            sim.velZ += (targetOffsetRotZ - sim.rotZ) * springStrength * delta;
+
+            sim.velX *= damping;
+            sim.velZ *= damping;
+
+            sim.rotX += sim.velX;
+            sim.rotZ += sim.velZ;
+
+            if (isHair && (restRot.x + sim.rotX) < -0.06) {
+              sim.rotX = -0.06 - restRot.x;
+              sim.velX = 0;
+            }
+
+            bone.rotation.x = restRot.x + sim.rotX;
+            bone.rotation.z = restRot.z + sim.rotZ;
+          }
+        });
+      }
+
       if (currentModelRef.current) {
         updateBoneOverlays();
       }
@@ -306,6 +400,10 @@ export default function VrmEditorApp() {
   useEffect(() => {
     boneLabelsGroupRef.current.visible = showBoneNames;
   }, [showBoneNames]);
+
+  useEffect(() => {
+    collidersGroupRef.current.visible = showColliders;
+  }, [showColliders]);
 
   const switchMaterialType = (type) => {
     setActiveMaterialMode(type);
@@ -362,6 +460,7 @@ export default function VrmEditorApp() {
   const selectBoneByObject = (bone) => {
     if (!bone) return;
     setSelectedBoneName(bone.name);
+    setSelectedColliderName('');
     if (transformControlsRef.current) {
       transformControlsRef.current.attach(bone);
     }
@@ -378,6 +477,7 @@ export default function VrmEditorApp() {
 
   const handleSelectBoneFromList = (bName) => {
     setSelectedBoneName(bName);
+    setSelectedColliderName('');
     if (!bName) {
       if (transformControlsRef.current) transformControlsRef.current.detach();
       boneMarkersGroupRef.current.children.forEach((m) => {
@@ -390,6 +490,118 @@ export default function VrmEditorApp() {
     if (targetBone) {
       selectBoneByObject(targetBone);
     }
+  };
+
+  const selectColliderByName = (collName) => {
+    setSelectedColliderName(collName);
+    setSelectedBoneName('');
+    if (!collName) {
+      if (transformControlsRef.current) transformControlsRef.current.detach();
+      return;
+    }
+    const targetColl = collidersGroupRef.current.children.find((c) => c.name === collName);
+    if (targetColl && transformControlsRef.current) {
+      transformControlsRef.current.attach(targetColl);
+    }
+  };
+
+  // GESTIÓN DE COLISIONADORES (Hijos directos del hueso correspondiente)
+  const buildColliderVisuals = (map) => {
+    const group = collidersGroupRef.current;
+    while (group.children.length > 0) {
+      const o = group.children[0];
+      group.remove(o);
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) o.material.dispose();
+    }
+
+    const collMat = () =>
+      new THREE.MeshBasicMaterial({
+        color: 0xec4899,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.65,
+        depthTest: false
+      });
+
+    const initialColliders = [
+      {
+        name: 'Collider_Espalda',
+        boneName: 'chest',
+        pos: new THREE.Vector3(0, -0.04, -0.06),
+        scale: new THREE.Vector3(0.9, 1.6, 0.5), // Aplanado en Z
+        radius: 0.08
+      },
+      {
+        name: 'Collider_Cadera',
+        boneName: 'hips',
+        pos: new THREE.Vector3(0, -0.05, -0.04),
+        scale: new THREE.Vector3(1.1, 1.2, 0.6),
+        radius: 0.09
+      },
+      {
+        name: 'Collider_Cabeza',
+        boneName: 'head',
+        pos: new THREE.Vector3(0, 0.06, -0.02),
+        scale: new THREE.Vector3(1.0, 1.1, 1.0),
+        radius: 0.09
+      }
+    ];
+
+    const names = [];
+    initialColliders.forEach((def) => {
+      const bone = map[def.boneName] || map[VRM_BONE_MAP[def.boneName]];
+      if (bone) {
+        const sphereGeom = new THREE.SphereGeometry(def.radius, 16, 16);
+        const mesh = new THREE.Mesh(sphereGeom, collMat());
+        mesh.name = def.name;
+        mesh.scale.copy(def.scale);
+        mesh.position.copy(def.pos);
+        mesh.userData = {
+          bone: bone,
+          baseRadius: def.radius
+        };
+        bone.add(mesh);
+        group.add(mesh);
+        names.push(def.name);
+      }
+    });
+
+    setColliderList(names);
+    group.visible = showColliders;
+  };
+
+  const handleAddColliderToSelectedBone = () => {
+    if (!selectedBoneName) {
+      alert('Selecciona primero un hueso en la lista o escena para añadirle un colisionador.');
+      return;
+    }
+    const bone = bonesMapRef.current[selectedBoneName];
+    if (!bone) return;
+
+    const collName = `Collider_${selectedBoneName}_${Date.now().toString().slice(-4)}`;
+    const geom = new THREE.SphereGeometry(0.08, 16, 16);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.65,
+      depthTest: false
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.name = collName;
+    mesh.scale.set(1.0, 1.0, 1.0);
+    mesh.position.set(0, 0, 0);
+    mesh.userData = {
+      bone: bone,
+      baseRadius: 0.08
+    };
+
+    bone.add(mesh);
+    collidersGroupRef.current.add(mesh);
+    setColliderList((prev) => [...prev, collName]);
+    selectColliderByName(collName);
+    setShowColliders(true);
   };
 
   const buildBoneVisuals = (model) => {
@@ -453,6 +665,7 @@ export default function VrmEditorApp() {
     setBoneList(names);
     mGroup.visible = showSkeleton;
     lGroup.visible = showBoneNames;
+    buildColliderVisuals(map);
     updateBoneOverlays();
   };
 
@@ -481,7 +694,9 @@ export default function VrmEditorApp() {
             transformControlsRef.current.detach();
           }
           setSelectedBoneName('');
+          setSelectedColliderName('');
           originalMaterialsCacheRef.current.clear();
+          setTestPhysicsActive(false);
 
           const box = new THREE.Box3().setFromObject(model);
           const size = box.getSize(new THREE.Vector3());
@@ -538,7 +753,7 @@ export default function VrmEditorApp() {
         },
         (error) => {
           console.error(error);
-          alert('Error al leer el archivo VRM crudo');
+          alert('Error al leer el archivo VRM');
         }
       );
     };
@@ -563,6 +778,11 @@ export default function VrmEditorApp() {
 
     if (transformControlsRef.current) transformControlsRef.current.detach();
     setSelectedBoneName('');
+    setSelectedColliderName('');
+    setTestPhysicsActive(false);
+
+    // Ocultar mallas auxiliares antes de parsear con GLTFExporter
+    collidersGroupRef.current.children.forEach((c) => (c.visible = false));
 
     const savedPos = model.position.clone();
     const savedRotY = model.rotation.y;
@@ -577,7 +797,6 @@ export default function VrmEditorApp() {
     model.traverse((node) => {
       if (node.isBone) {
         originalNames.set(node, node.name);
-        // Excluir huesos secundarios (busto/pelo) del mapeo a huesos humanos estándar
         const isSecondaryBone =
           node.name.startsWith('Bust_') ||
           node.name.startsWith('Hair_') ||
@@ -596,35 +815,12 @@ export default function VrmEditorApp() {
       }
     });
 
-    // === REPORTE DE HORNEADO DE POSE T EN CONSOLA ERUDA ===
-    console.group('%c🔍 VERIFICACIÓN DE POSE T EN EXPORTACIÓN', 'color: #38bdf8; font-weight: bold; font-size: 13px;');
-    const armLeft = bonesMapRef.current['leftUpperArm'] || bonesMapRef.current['upperArm_L'];
-    const armRight = bonesMapRef.current['rightUpperArm'] || bonesMapRef.current['upperArm_R'];
-
-    const checkBoneBake = (bone, label) => {
-      if (!bone) {
-        console.warn(`⚠️ ${label}: Hueso no encontrado en el mapa.`);
-        return;
-      }
-      const rot = bone.rotation;
-      const isZeroRotation = Math.abs(rot.x) < 0.05 && Math.abs(rot.y) < 0.05 && Math.abs(rot.z) < 0.05;
-
-      if (isZeroRotation) {
-        console.log(`%c✅ ${label}: Pose T horneada correctamente (Rotación local neutra: [${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}])`, 'color: #10b981;');
-      } else {
-        console.warn(`%c⚠️ ${label}: El hueso conserva rotación local ([${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}]). Si no horneaste la pose, el modelo dependerá de esta inclinación.`, 'color: #f59e0b;');
-      }
-    };
-
-    checkBoneBake(armLeft, 'Brazo Izquierdo');
-    checkBoneBake(armRight, 'Brazo Derecho');
-    console.log('%cℹ️ Si ambos brazos muestran ✅ verde, la Pose T es la geometría física del archivo y no se restablecerá al editar dedos en el futuro.', 'color: #94a3b8;');
-    console.groupEnd();
-
     const exporter = new GLTFExporter();
     exporter.parse(
       model,
       (glbArrayBuffer) => {
+        collidersGroupRef.current.children.forEach((c) => (c.visible = showColliders));
+
         originalNames.forEach((name, node) => {
           node.name = name;
         });
@@ -664,7 +860,6 @@ export default function VrmEditorApp() {
 
         const titleName = modelName ? modelName.replace(/\.vrm$/i, '') : 'Avatar';
 
-        // Detección de índices para SpringBones (Busto, Cabello, Extras)
         const springNodeIndices = [];
         if (gltf.nodes) {
           gltf.nodes.forEach((node, idx) => {
@@ -673,12 +868,58 @@ export default function VrmEditorApp() {
               (node.name.startsWith('Bust_') ||
                 node.name.startsWith('Hair_') ||
                 node.name.startsWith('Extra_')) &&
-              !node.name.endsWith('_end') // Los huesos de punta no inician grupos de resorte
+              !node.name.endsWith('_end')
             ) {
               springNodeIndices.push(idx);
             }
           });
         }
+
+        // EXPORTACIÓN FIEL DE LOS COLISIONADORES OVALADOS MODIFICADOS
+        const vrmColliderGroups = [];
+        const connectedColliderIndices = [];
+
+        collidersGroupRef.current.children.forEach((collMesh) => {
+          const parentBone = collMesh.userData.bone;
+          if (!parentBone) return;
+
+          const boneCanonical = VRM_BONE_MAP[parentBone.name] || parentBone.name;
+          const nodeIdx = gltf.nodes.findIndex(
+            (n) => n.name === boneCanonical || n.name === parentBone.name
+          );
+
+          if (nodeIdx === -1) return;
+
+          // Obtener los datos reales de traslación y escala modificados
+          const pos = collMesh.position;
+          const sc = collMesh.scale;
+          const baseR = collMesh.userData.baseRadius || 0.08;
+
+          // Descomposición del óvalo en esferas alineadas
+          const effRadius = baseR * Math.max(sc.x, sc.z);
+          const totalHeight = baseR * sc.y * 2;
+          const count = Math.max(2, Math.min(4, Math.round(totalHeight / (effRadius * 1.35))));
+          const stepY = (totalHeight - effRadius * 2) / (count - 1 || 1);
+
+          const generatedSpheres = [];
+          for (let i = 0; i < count; i++) {
+            const yOffset = pos.y + (totalHeight / 2 - effRadius) - i * stepY;
+            generatedSpheres.push({
+              offset: {
+                x: parseFloat(pos.x.toFixed(3)),
+                y: parseFloat(yOffset.toFixed(3)),
+                z: parseFloat(pos.z.toFixed(3))
+              },
+              radius: parseFloat(effRadius.toFixed(3))
+            });
+          }
+
+          connectedColliderIndices.push(vrmColliderGroups.length);
+          vrmColliderGroups.push({
+            node: nodeIdx,
+            colliders: generatedSpheres
+          });
+        });
 
         gltf.extensions = gltf.extensions || {};
         gltf.extensions.VRM = {
@@ -713,14 +954,16 @@ export default function VrmEditorApp() {
           secondaryAnimation: {
             boneGroups: springNodeIndices.length > 0 ? [
               {
-                comment: 'PhysicsBones',
-                stiffiness: 0.5,
+                comment: 'HairAndBustPhysics',
+                stiffiness: 0.22,
                 gravityPower: 0.1,
                 dragForce: 0.4,
-                bones: springNodeIndices
+                hitRadius: 0.02,
+                bones: springNodeIndices,
+                colliderGroups: connectedColliderIndices
               }
             ] : [],
-            colliderGroups: []
+            colliderGroups: vrmColliderGroups
           }
         };
 
@@ -761,9 +1004,10 @@ export default function VrmEditorApp() {
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
 
-        alert(`✅ Exportado con rotación horneada de ${currentCorrectionDeg}° y físicas secundarias.`);
+        alert(`✅ Guardado con ${vrmColliderGroups.length} colisionadores configurados.`);
       },
       (error) => {
+        collidersGroupRef.current.children.forEach((c) => (c.visible = showColliders));
         originalNames.forEach((name, node) => {
           node.name = name;
         });
@@ -777,11 +1021,15 @@ export default function VrmEditorApp() {
     );
   };
 
+  const currentSelectedColl = collidersGroupRef.current.children.find(
+    (c) => c.name === selectedColliderName
+  );
+
   return (
     <>
       <div ref={containerRef} style={{ width: '100vw', height: '100vh', position: 'absolute', top: 0, left: 0 }} />
 
-      <div style={{ position: 'absolute', top: 12, left: 12, zIndex: 100, display: 'flex', gap: 6, flexWrap: 'wrap', maxWidth: '72%' }}>
+      <div style={{ position: 'absolute', top: 12, left: 12, zIndex: 100, display: 'flex', gap: 6, flexWrap: 'wrap', maxWidth: '82%' }}>
         <Link
           to="/rig"
           style={{
@@ -829,6 +1077,22 @@ export default function VrmEditorApp() {
         </button>
 
         <button
+          onClick={() => setShowColliders(!showColliders)}
+          style={{
+            background: showColliders ? '#ec4899' : 'rgba(30, 41, 59, 0.85)',
+            color: '#fff',
+            padding: '7px 10px',
+            borderRadius: 8,
+            border: showColliders ? '2px solid #f472b6' : '1px solid #475569',
+            fontSize: 11,
+            cursor: 'pointer',
+            fontWeight: 'bold'
+          }}
+        >
+          {showColliders ? '🛡️ Colliders ON' : '🛡️ Colliders OFF'}
+        </button>
+
+        <button
           onClick={() => setShowCalibrator(!showCalibrator)}
           style={{
             background: showCalibrator ? '#f59e0b' : 'rgba(30, 41, 59, 0.85)',
@@ -871,6 +1135,68 @@ export default function VrmEditorApp() {
           }}
         >
           ✨ Huesos Extras
+        </button>
+
+        <button
+          onClick={() => {
+            const next = !testPhysicsActive;
+            setTestPhysicsActive(next);
+
+            if (next && bonesMapRef.current) {
+              baseRestRotationsRef.current.clear();
+              Object.keys(bonesMapRef.current).forEach((bName) => {
+                if (bName.startsWith('Hair_') || bName.startsWith('Bust_')) {
+                  const b = bonesMapRef.current[bName];
+                  if (b) {
+                    baseRestRotationsRef.current.set(bName, {
+                      x: b.rotation.x,
+                      y: b.rotation.y,
+                      z: b.rotation.z
+                    });
+                  }
+                }
+              });
+            } else if (!next && bonesMapRef.current) {
+              Object.keys(bonesMapRef.current).forEach((bName) => {
+                if (bName.startsWith('Hair_') || bName.startsWith('Bust_')) {
+                  const b = bonesMapRef.current[bName];
+                  if (b) {
+                    const origRot = baseRestRotationsRef.current.get(bName);
+                    if (origRot) {
+                      b.rotation.set(origRot.x, origRot.y, origRot.z);
+                    }
+                    b.updateMatrix();
+                    b.updateMatrixWorld(true);
+                  }
+                }
+              });
+
+              if (currentModelRef.current) {
+                currentModelRef.current.updateMatrixWorld(true);
+                currentModelRef.current.traverse((node) => {
+                  if (node.isSkinnedMesh && node.skeleton) {
+                    node.skeleton.update();
+                  }
+                });
+                updateBoneOverlays();
+              }
+
+              springSimDataRef.current.clear();
+              baseRestRotationsRef.current.clear();
+            }
+          }}
+          style={{
+            background: testPhysicsActive ? '#10b981' : 'rgba(30, 41, 59, 0.85)',
+            color: '#fff',
+            padding: '7px 10px',
+            borderRadius: 8,
+            border: testPhysicsActive ? '2px solid #34d399' : '1px solid #475569',
+            fontSize: 11,
+            cursor: 'pointer',
+            fontWeight: 'bold'
+          }}
+        >
+          {testPhysicsActive ? '⏹ Parar Sacudida' : '🌊 Probar Física en Vivo'}
         </button>
       </div>
 
@@ -1012,6 +1338,54 @@ export default function VrmEditorApp() {
             </div>
           )}
 
+          {/* PANEL DE CONTROL DE COLISIONADORES */}
+          {showColliders && (
+            <div style={{ marginTop: 8, padding: 8, background: '#1e293b', borderRadius: 8, border: '1px solid #ec4899' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ color: '#f472b6', fontWeight: 'bold', fontSize: 11 }}>
+                  🛡️ Colisionadores ({colliderList.length}):
+                </span>
+                <button
+                  onClick={handleAddColliderToSelectedBone}
+                  style={{
+                    background: '#db2777',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 4,
+                    fontSize: 9,
+                    padding: '3px 6px',
+                    cursor: 'pointer',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  + Agregar en Hueso
+                </button>
+              </div>
+
+              <select
+                value={selectedColliderName}
+                onChange={(e) => selectColliderByName(e.target.value)}
+                style={{
+                  width: '100%',
+                  background: '#0f172a',
+                  color: '#ec4899',
+                  border: '1px solid #db2777',
+                  padding: '5px',
+                  borderRadius: 6,
+                  fontSize: 10,
+                  fontWeight: 'bold'
+                }}
+              >
+                <option value="">-- Seleccionar Colisionador --</option>
+                {colliderList.map((cName) => (
+                  <option key={cName} value={cName}>
+                    🛡️ {cName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {boneList.length > 0 && (
             <div style={{ marginTop: 8 }}>
               <select
@@ -1105,39 +1479,54 @@ export default function VrmEditorApp() {
             </div>
           )}
 
-          {selectedBoneName && (
+          {/* GIZMO CONTROLS (HUESOS O COLISIONADOR) */}
+          {(selectedBoneName || selectedColliderName) && (
             <div style={{ marginTop: 8, padding: 8, background: '#1e293b', borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid #8b5cf6' }}>
-              <span style={{ fontSize: 11, color: '#facc15', fontWeight: 'bold', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 150, whiteSpace: 'nowrap' }}>
-                🦴 {selectedBoneName}
+              <span style={{ fontSize: 11, color: selectedColliderName ? '#f472b6' : '#facc15', fontWeight: 'bold', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 140, whiteSpace: 'nowrap' }}>
+                {selectedColliderName ? `🛡️ ${selectedColliderName}` : `🦴 ${selectedBoneName}`}
               </span>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  onClick={() => setTransformMode('rotate')}
-                  style={{
-                    background: transformMode === 'rotate' ? '#0284c7' : '#334155',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: 6,
-                    fontSize: 11,
-                    padding: '4px 10px',
-                    fontWeight: 'bold'
-                  }}
-                >
-                  Rotar
-                </button>
+              <div style={{ display: 'flex', gap: 4 }}>
                 <button
                   onClick={() => setTransformMode('translate')}
                   style={{
                     background: transformMode === 'translate' ? '#0284c7' : '#334155',
                     color: '#fff',
                     border: 'none',
-                    borderRadius: 6,
-                    fontSize: 11,
-                    padding: '4px 10px',
+                    borderRadius: 5,
+                    fontSize: 10,
+                    padding: '4px 8px',
                     fontWeight: 'bold'
                   }}
                 >
                   Mover
+                </button>
+                <button
+                  onClick={() => setTransformMode('rotate')}
+                  style={{
+                    background: transformMode === 'rotate' ? '#0284c7' : '#334155',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 5,
+                    fontSize: 10,
+                    padding: '4px 8px',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  Rotar
+                </button>
+                <button
+                  onClick={() => setTransformMode('scale')}
+                  style={{
+                    background: transformMode === 'scale' ? '#0284c7' : '#334155',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 5,
+                    fontSize: 10,
+                    padding: '4px 8px',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  Escalar
                 </button>
               </div>
             </div>
@@ -1155,7 +1544,7 @@ export default function VrmEditorApp() {
         />
       )}
 
-      {panelVisible && showExtraBones && (
+      {showExtraBones && (
         <ExtraBonePanel
           currentModel={currentModelRef.current}
           bonesMap={bonesMapRef.current}
@@ -1177,6 +1566,9 @@ export default function VrmEditorApp() {
           onUpdateOverlays={updateBoneOverlays}
           onClose={() => setShowManualRig(false)}
           visible={panelVisible}
+          undoStackRef={globalUndoStackRef}
+          undoCount={globalUndoCount}
+          setUndoCount={setGlobalUndoCount}
         />
       )}
     </>

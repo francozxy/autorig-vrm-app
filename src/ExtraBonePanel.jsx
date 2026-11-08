@@ -13,10 +13,8 @@ export default function ExtraBonePanel({
   const [createdBones, setCreatedBones] = useState([]);
   const [lastHairBoneName, setLastHairBoneName] = useState(null);
 
-  // 1. RECUPERAR HUESOS EXISTENTES AL ABRIR EL PANEL (Evita que se reinicie al ocultar)
   useEffect(() => {
     if (!bonesMap) return;
-
     const detected = [];
     let highestHairLink = null;
     let highestNum = 0;
@@ -36,9 +34,7 @@ export default function ExtraBonePanel({
     });
 
     setCreatedBones(detected);
-    if (highestHairLink) {
-      setLastHairBoneName(highestHairLink);
-    }
+    if (highestHairLink) setLastHairBoneName(highestHairLink);
   }, [bonesMap, visible]);
 
   const getBaseParent = (type) => {
@@ -58,19 +54,106 @@ export default function ExtraBonePanel({
     return bonesMap['hips'] || null;
   };
 
-  // 2. BUSCADOR INTELIGENTE DE ÍNDICE LIBRE
+  const getSkinnedMeshes = () => {
+    const list = [];
+    if (currentModel) {
+      currentModel.traverse((node) => {
+        if (node.isSkinnedMesh) list.push(node);
+      });
+    }
+    return list;
+  };
+
+  // AGREGAR O COMPLETAR CON HUESO FINAL SIN RECREAR LA BASE
+  const handleAddBustBone = (side = 'L') => {
+    if (!currentModel) {
+      alert('Primero carga un modelo VRM.');
+      return;
+    }
+
+    const boneName = `Bust_${side}`;
+    const endName = `${boneName}_end`;
+
+    // CASO 1: La base ya existe -> Añadir únicamente la punta si le falta
+    if (bonesMap[boneName]) {
+      const baseBone = bonesMap[boneName];
+
+      if (bonesMap[endName]) {
+        if (onSelectBone) onSelectBone(endName);
+        if (transformControls) {
+          transformControls.setMode('translate');
+          transformControls.attach(bonesMap[endName]);
+        }
+        alert(`ℹ️ ${boneName} ya tiene su punta (${endName}). Gizmo acoplado a la punta.`);
+        return;
+      }
+
+      const endBone = new THREE.Bone();
+      endBone.name = endName;
+      endBone.userData = { isEndBone: true };
+      endBone.position.set(0, -0.035, 0.03);
+
+      baseBone.add(endBone);
+      baseBone.updateWorldMatrix(true, true);
+
+      bonesMap[endName] = endBone;
+      setCreatedBones((prev) => [...new Set([...prev, endName])]);
+
+      if (onSelectBone) onSelectBone(endName);
+      if (transformControls) {
+        transformControls.setMode('translate');
+        transformControls.attach(endBone);
+      }
+
+      if (onUpdateOverlays) onUpdateOverlays();
+      alert(`✅ Punta (${endName}) agregada exitosamente a ${boneName}.`);
+      return;
+    }
+
+    // CASO 2: No existe ninguno -> Crear base + punta juntas
+    const chestBone = getBaseParent('bust');
+    if (!chestBone) {
+      alert('No se encontró el hueso del pecho (chest / upperChest).');
+      return;
+    }
+
+    const newBone = new THREE.Bone();
+    newBone.name = boneName;
+    newBone.userData = { isSpringBone: true, springGroup: 'bust' };
+    newBone.position.set(side === 'L' ? 0.065 : -0.065, -0.04, 0.08);
+
+    const endBone = new THREE.Bone();
+    endBone.name = endName;
+    endBone.userData = { isEndBone: true };
+    endBone.position.set(0, -0.035, 0.03);
+    newBone.add(endBone);
+
+    chestBone.add(newBone);
+    chestBone.updateWorldMatrix(true, true);
+
+    bonesMap[boneName] = newBone;
+    bonesMap[endName] = endBone;
+
+    setCreatedBones((prev) => [...new Set([...prev, boneName, endName])]);
+
+    if (onSelectBone) onSelectBone(boneName);
+    if (transformControls) {
+      transformControls.setMode('translate');
+      transformControls.attach(newBone);
+    }
+
+    if (onUpdateOverlays) onUpdateOverlays();
+    alert(`🦴 Creado ${boneName} junto con su punta (${endName}).`);
+  };
+
   const getNextHairName = () => {
     let index = 1;
-    while (
-      bonesMap &&
-      (bonesMap[`Hair_Link_${index}`] || bonesMap[`Hair_Strand_${index}`])
-    ) {
+    while (bonesMap && (bonesMap[`Hair_Link_${index}`] || bonesMap[`Hair_Strand_${index}`])) {
       index++;
     }
     return `Hair_Link_${index}`;
   };
 
-  // 3. AGREGAR ESLABÓN DE CABELLO
   const handleAddHairLink = () => {
     if (!currentModel) {
       alert('Primero carga un modelo VRM.');
@@ -84,6 +167,7 @@ export default function ExtraBonePanel({
     }
 
     const newBoneName = getNextHairName();
+    const endName = `${newBoneName}_end`;
 
     const parentBone =
       lastHairBoneName && bonesMap[lastHairBoneName]
@@ -100,11 +184,18 @@ export default function ExtraBonePanel({
       newBone.position.set(0, -0.07, 0);
     }
 
+    const hairEnd = new THREE.Bone();
+    hairEnd.name = endName;
+    hairEnd.position.set(0, -0.06, 0);
+    newBone.add(hairEnd);
+
     parentBone.add(newBone);
-    newBone.updateMatrixWorld(true);
+    parentBone.updateWorldMatrix(true, true);
 
     bonesMap[newBoneName] = newBone;
-    setCreatedBones((prev) => [...new Set([...prev, newBoneName])]);
+    bonesMap[endName] = hairEnd;
+
+    setCreatedBones((prev) => [...new Set([...prev, newBoneName, endName])]);
     setLastHairBoneName(newBoneName);
 
     if (onSelectBone) onSelectBone(newBoneName);
@@ -116,59 +207,15 @@ export default function ExtraBonePanel({
     if (onUpdateOverlays) onUpdateOverlays();
   };
 
-  // 4. AGREGAR HUESO DE BUSTO
-  const handleAddBustBone = (side = 'L') => {
-    if (!currentModel) {
-      alert('Primero carga un modelo VRM.');
-      return;
-    }
-
-    const chestBone = getBaseParent('bust');
-    if (!chestBone) {
-      alert('No se encontró el hueso del pecho (chest / upperChest).');
-      return;
-    }
-
-    const boneName = `Bust_${side}`;
-    if (bonesMap[boneName]) {
-      alert(`El hueso ${boneName} ya existe en el modelo.`);
-      return;
-    }
-
-    const newBone = new THREE.Bone();
-    newBone.name = boneName;
-    newBone.userData = { isSpringBone: true, springGroup: 'bust' };
-    newBone.position.set(side === 'L' ? 0.065 : -0.065, -0.04, 0.08);
-
-    chestBone.add(newBone);
-    newBone.updateMatrixWorld(true);
-
-    bonesMap[boneName] = newBone;
-    setCreatedBones((prev) => [...new Set([...prev, boneName])]);
-
-    if (onSelectBone) onSelectBone(boneName);
-    if (transformControls) {
-      transformControls.setMode('translate');
-      transformControls.attach(newBone);
-    }
-
-    if (onUpdateOverlays) onUpdateOverlays();
-  };
-
   const handleStartNewStrand = () => {
     setLastHairBoneName(null);
-    alert('Próximo eslabón nacerá desde la cabeza (nuevo mechón separado).');
+    alert('Próximo eslabón nacerá desde la cabeza (nuevo mechón).');
   };
 
-  // 5. RE-BIND PRESERVANDO ÍNDICES Y MALLAS
   const handleRebindWithExtras = () => {
     if (!currentModel || !bonesMap) return;
 
-    const meshes = [];
-    currentModel.traverse((node) => {
-      if (node.isSkinnedMesh && node.skeleton) meshes.push(node);
-    });
-
+    const meshes = getSkinnedMeshes().filter((m) => m.skeleton);
     if (!meshes.length) {
       alert('No se encontraron mallas con esqueleto para vincular.');
       return;
@@ -179,9 +226,7 @@ export default function ExtraBonePanel({
 
     createdBones.forEach((bName) => {
       const bObj = bonesMap[bName];
-      if (bObj && !existingBones.includes(bObj)) {
-        existingBones.push(bObj);
-      }
+      if (bObj && !existingBones.includes(bObj)) existingBones.push(bObj);
     });
 
     const expandedSkeleton = new THREE.Skeleton(existingBones);
@@ -202,9 +247,9 @@ export default function ExtraBonePanel({
         return v;
       });
 
-      const extraIndices = createdBones.map((name) =>
-        existingBones.findIndex((b) => b.name === name)
-      );
+      const extraIndices = createdBones
+        .filter((name) => !name.endsWith('_end'))
+        .map((name) => existingBones.findIndex((b) => b.name === name));
 
       for (let i = 0; i < count; i++) {
         vertPos.fromBufferAttribute(posAttr, i);
@@ -216,7 +261,7 @@ export default function ExtraBonePanel({
           const bPos = boneWorldPos[bIdx];
           const dist = vertPos.distanceTo(bPos);
 
-          if (bName.startsWith('Bust_') && dist < 0.085 && vertPos.z > bPos.z - 0.02) {
+          if (bName.startsWith('Bust_') && dist < 0.10 && vertPos.z > bPos.z - 0.02) {
             const currentBone0 = existingBones[siAttr.getX(i)]?.name || '';
             const isArmOrHand =
               currentBone0.includes('Hand') ||
@@ -225,7 +270,7 @@ export default function ExtraBonePanel({
               currentBone0.includes('Thumb');
 
             if (!isArmOrHand) {
-              const weightStrength = Math.pow(1.0 - dist / 0.085, 2) * 0.55;
+              const weightStrength = Math.pow(1.0 - dist / 0.10, 1.8) * 0.70;
               siAttr.setComponent(i, 3, bIdx);
               swAttr.setComponent(i, 3, weightStrength);
             }
@@ -248,12 +293,11 @@ export default function ExtraBonePanel({
 
       siAttr.needsUpdate = true;
       swAttr.needsUpdate = true;
-
       mesh.bind(expandedSkeleton, mesh.matrixWorld);
     });
 
     if (onUpdateOverlays) onUpdateOverlays();
-    alert(`🔗 Re-Bind completado con ${createdBones.length} huesos agregados.`);
+    alert(`🔗 Re-Bind completado con éxito con ${createdBones.length} huesos vinculados.`);
   };
 
   return (
@@ -263,7 +307,7 @@ export default function ExtraBonePanel({
         position: 'absolute',
         top: 60,
         right: 12,
-        width: 300,
+        width: 305,
         background: 'rgba(15, 23, 42, 0.95)',
         border: '1px solid #ec4899',
         borderRadius: 12,
@@ -276,10 +320,53 @@ export default function ExtraBonePanel({
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, borderBottom: '1px solid #334155', paddingBottom: 6 }}>
-        <span style={{ fontWeight: 'bold', color: '#f472b6' }}>✨ Huesos Extras (Cadena Pelo / Busto)</span>
+        <span style={{ fontWeight: 'bold', color: '#f472b6' }}>✨ Huesos Extras (Pelo / Busto)</span>
         <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 15 }}>
           ✖
         </button>
+      </div>
+
+      {/* BOTONES DE BUSTO INTELIGENTES */}
+      <div style={{ marginBottom: 10, background: '#1e293b', padding: 8, borderRadius: 8, border: '1px solid #475569' }}>
+        <span style={{ color: '#cbd5e1', fontWeight: 'bold', display: 'block', marginBottom: 6 }}>
+          🦴 Huesos Físicos de Busto:
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={() => handleAddBustBone('L')}
+            style={{
+              flex: 1,
+              background: '#db2777',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              padding: '6px',
+              fontWeight: 'bold',
+              cursor: 'pointer'
+            }}
+          >
+            {bonesMap && bonesMap['Bust_L']
+              ? (bonesMap['Bust_L_end'] ? '📍 Punta Busto L' : '+ Punta Busto L')
+              : '+ Busto Izq (L)'}
+          </button>
+          <button
+            onClick={() => handleAddBustBone('R')}
+            style={{
+              flex: 1,
+              background: '#db2777',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              padding: '6px',
+              fontWeight: 'bold',
+              cursor: 'pointer'
+            }}
+          >
+            {bonesMap && bonesMap['Bust_R']
+              ? (bonesMap['Bust_R_end'] ? '📍 Punta Busto R' : '+ Punta Busto R')
+              : '+ Busto Der (R)'}
+          </button>
+        </div>
       </div>
 
       {/* SECCIÓN CABELLO */}
@@ -287,7 +374,7 @@ export default function ExtraBonePanel({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
           <span style={{ color: '#cbd5e1', fontWeight: 'bold' }}>💇 Cadena de Cabello:</span>
           {lastHairBoneName && (
-            <span style={{ color: '#38bdf8', fontSize: 10 }}>Conectando a: {lastHairBoneName}</span>
+            <span style={{ color: '#38bdf8', fontSize: 10 }}>Hijo de: {lastHairBoneName}</span>
           )}
         </div>
 
@@ -299,10 +386,10 @@ export default function ExtraBonePanel({
             color: '#fff',
             border: 'none',
             borderRadius: 6,
-            padding: '8px',
+            padding: '7px',
             fontWeight: 'bold',
             cursor: 'pointer',
-            marginBottom: 6
+            marginBottom: 4
           }}
         >
           {lastHairBoneName ? `+ Continuar Cadena (${lastHairBoneName})` : '+ Crear Inicio de Mechón (Head)'}
@@ -322,53 +409,14 @@ export default function ExtraBonePanel({
               fontSize: 10
             }}
           >
-            ✂️ Cortar y empezar otro mechón separado
+            ✂️ Cortar y empezar otro mechón
           </button>
         )}
       </div>
 
-      {/* SECCIÓN BUSTO */}
-      <div style={{ marginBottom: 10, background: '#1e293b', padding: 8, borderRadius: 8, border: '1px solid #475569' }}>
-        <span style={{ color: '#cbd5e1', fontWeight: 'bold', display: 'block', marginBottom: 6 }}>
-          🎀 Huesos de Busto:
-        </span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
-            onClick={() => handleAddBustBone('L')}
-            style={{
-              flex: 1,
-              background: '#db2777',
-              color: '#fff',
-              border: 'none',
-              borderRadius: 6,
-              padding: '6px',
-              fontWeight: 'bold',
-              cursor: 'pointer'
-            }}
-          >
-            + Busto Izq (L)
-          </button>
-          <button
-            onClick={() => handleAddBustBone('R')}
-            style={{
-              flex: 1,
-              background: '#db2777',
-              color: '#fff',
-              border: 'none',
-              borderRadius: 6,
-              padding: '6px',
-              fontWeight: 'bold',
-              cursor: 'pointer'
-            }}
-          >
-            + Busto Der (R)
-          </button>
-        </div>
-      </div>
-
-      {/* LISTA DE HUESOS (Persiste aunque cierres el panel) */}
+      {/* LISTA DE HUESOS (SELECCIÓN DIRECTA DE BASE Y PUNTAS) */}
       {createdBones.length > 0 && (
-        <div style={{ marginBottom: 8, maxHeight: 110, overflowY: 'auto', background: '#0f172a', padding: 6, borderRadius: 6, border: '1px solid #334155' }}>
+        <div style={{ marginBottom: 8, maxHeight: 95, overflowY: 'auto', background: '#0f172a', padding: 6, borderRadius: 6, border: '1px solid #334155' }}>
           <span style={{ color: '#94a3b8', fontSize: 10, display: 'block', marginBottom: 4 }}>
             Huesos creados ({createdBones.length}):
           </span>
@@ -382,9 +430,9 @@ export default function ExtraBonePanel({
                 }
               }}
               style={{
-                color: bName.startsWith('Hair') ? '#c084fc' : '#f472b6',
+                color: bName.endsWith('_end') ? '#94a3b8' : (bName.startsWith('Hair') ? '#c084fc' : '#f472b6'),
                 cursor: 'pointer',
-                padding: '4px 6px',
+                padding: '3px 6px',
                 borderRadius: 4,
                 marginBottom: 2,
                 background: '#1e293b',
@@ -393,14 +441,14 @@ export default function ExtraBonePanel({
                 alignItems: 'center'
               }}
             >
-              <span>🦴 {bName}</span>
+              <span>{bName.endsWith('_end') ? `↳ 📍 ${bName}` : `🦴 ${bName}`}</span>
               <span style={{ color: '#38bdf8', fontSize: 9 }}>Mover ↕️</span>
             </div>
           ))}
         </div>
       )}
 
-      {/* BOTÓN RE-BIND */}
+      {/* BOTÓN RE-BIND SEGURO */}
       <button
         onClick={handleRebindWithExtras}
         disabled={createdBones.length === 0}

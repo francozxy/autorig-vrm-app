@@ -10,21 +10,27 @@ export default function ManualRigPanel({
   transformControls,
   onUpdateOverlays,
   onClose,
-  visible = true
+  visible = true,
+  undoStackRef,
+  undoCount,
+  setUndoCount
 }) {
   const [paintMode, setPaintMode] = useState('inspect');
   const [brushSize, setBrushSize] = useState(8);
   const [brushStrength, setBrushStrength] = useState(50);
-  const [undoCount, setUndoCount] = useState(0);
   const [isLocked, setIsLocked] = useState(false);
   const [isEditMode, setIsEditMode] = useState(false);
   const [headScaleFactor, setHeadScaleFactor] = useState(1.0);
+  const [bustScaleFactor, setBustScaleFactor] = useState(1.0);
 
   const origMaterialsMapRef = useRef(new Map());
   const initialWeightsMapRef = useRef(new Map());
   const initialBoneTransformsRef = useRef(new Map());
   const disconnectedSkeletonsRef = useRef(new Map());
-  const undoStackRef = useRef([]);
+
+  // Fallback seguro si no se pasaran desde el padre
+  const internalUndoStackRef = useRef([]);
+  const activeUndoStack = undoStackRef || (currentModel ? (currentModel.userData.rigUndoStack ||= []) : internalUndoStackRef.current);
 
   const cursorMeshRef = useRef(null);
   const isPaintingRef = useRef(false);
@@ -70,6 +76,18 @@ export default function ManualRigPanel({
     return { scene, camera };
   };
 
+  // VERIFICAR SI EXISTEN HUESOS DE BUSTO EN EL MODELO
+  const hasBustBones = Boolean(
+    bonesMap && (bonesMap['Bust_L'] || bonesMap['Bust_R'])
+  );
+
+  const updateUndoUI = () => {
+    const stack = Array.isArray(activeUndoStack) ? activeUndoStack : activeUndoStack.current;
+    if (setUndoCount) {
+      setUndoCount(stack.length);
+    }
+  };
+
   const pushUndoSnapshot = () => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length) return;
@@ -81,15 +99,18 @@ export default function ManualRigPanel({
       position: m.geometry.attributes.position.array.slice()
     }));
 
-    undoStackRef.current.push(snapshot);
-    if (undoStackRef.current.length > 25) undoStackRef.current.shift();
-    setUndoCount(undoStackRef.current.length);
+    const stack = Array.isArray(activeUndoStack) ? activeUndoStack : activeUndoStack.current;
+    stack.push(snapshot);
+    if (stack.length > 30) stack.shift();
+    updateUndoUI();
   };
 
   const handleUndo = () => {
-    if (!undoStackRef.current.length) return;
-    const prev = undoStackRef.current.pop();
-    setUndoCount(undoStackRef.current.length);
+    const stack = Array.isArray(activeUndoStack) ? activeUndoStack : activeUndoStack.current;
+    if (!stack || !stack.length) return;
+
+    const prev = stack.pop();
+    updateUndoUI();
 
     const meshes = getSkinnedMeshes();
     meshes.forEach((m) => {
@@ -116,7 +137,7 @@ export default function ManualRigPanel({
     if (onUpdateOverlays) onUpdateOverlays();
   };
 
-  // ESCALADO DE CABEZA DIRECTO EN VERTICES (SIN AFECTAR EL HUESO)
+  // ESCALADO DE CABEZA POR VÉRTICES
   const applyHeadScale = (scaleMultiplier) => {
     const meshes = getSkinnedMeshes();
     const headBone = bonesMap?.head || bonesMap?.J_Bip_C_Head;
@@ -173,17 +194,76 @@ export default function ManualRigPanel({
       }
 
       posAttr.needsUpdate = true;
-      geometry.computeVertexNormals();
-      geometry.computeBoundingBox();
-      geometry.computeBoundingSphere();
+      mesh.geometry.computeVertexNormals();
+      mesh.geometry.computeBoundingBox();
+      mesh.geometry.computeBoundingSphere();
     });
 
     computeWP(meshes);
     if (onUpdateOverlays) onUpdateOverlays();
-    alert(`✅ Escala de cabeza ajustada a ${(scaleMultiplier * 100).toFixed(0)}% sin alterar los huesos.`);
+    alert(`✅ Escala de cabeza ajustada a ${(scaleMultiplier * 100).toFixed(0)}%.`);
   };
 
-  // 1. Alternar Modo Edición para desacoplar esqueleto
+  // ESCALADO DE BUSTO POR VÉRTICES (CONDICIONAL)
+  const applyBustScale = (multiplier) => {
+    const meshes = getSkinnedMeshes();
+    const chestBone =
+      bonesMap?.upperChest ||
+      bonesMap?.chest ||
+      bonesMap?.J_Bip_C_UpperChest ||
+      bonesMap?.J_Bip_C_Chest;
+
+    if (!meshes.length || !chestBone) {
+      alert('No se encontró el hueso del pecho.');
+      return;
+    }
+
+    pushUndoSnapshot();
+
+    const chestWorldPos = new THREE.Vector3();
+    chestBone.getWorldPosition(chestWorldPos);
+
+    const vertWorldPos = new THREE.Vector3();
+    const tempDir = new THREE.Vector3();
+
+    meshes.forEach((mesh) => {
+      if (!mesh.geometry) return;
+      mesh.updateMatrixWorld(true);
+
+      const posAttr = mesh.geometry.attributes.position;
+      const count = posAttr.count;
+
+      for (let i = 0; i < count; i++) {
+        vertWorldPos.fromBufferAttribute(posAttr, i);
+        vertWorldPos.applyMatrix4(mesh.matrixWorld);
+
+        const dist = vertWorldPos.distanceTo(chestWorldPos);
+        const isFrontal = vertWorldPos.z > chestWorldPos.z - 0.01;
+
+        if (dist < 0.18 && isFrontal) {
+          tempDir.subVectors(vertWorldPos, chestWorldPos);
+          const factor = Math.pow(1.0 - dist / 0.18, 1.8);
+          tempDir.z *= 1.0 + (multiplier - 1.0) * factor * 1.5;
+          tempDir.x *= 1.0 + (multiplier - 1.0) * factor * 1.1;
+          tempDir.y *= 1.0 + (multiplier - 1.0) * factor * 0.9;
+
+          vertWorldPos.copy(chestWorldPos).add(tempDir);
+          mesh.worldToLocal(vertWorldPos);
+          posAttr.setXYZ(i, vertWorldPos.x, vertWorldPos.y, vertWorldPos.z);
+        }
+      }
+
+      posAttr.needsUpdate = true;
+      mesh.geometry.computeVertexNormals();
+      mesh.geometry.computeBoundingBox();
+      mesh.geometry.computeBoundingSphere();
+    });
+
+    computeWP(meshes);
+    if (onUpdateOverlays) onUpdateOverlays();
+    alert(`✅ Tamaño de busto ajustado a ${(multiplier * 100).toFixed(0)}%.`);
+  };
+
   const toggleEditMode = () => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length) return;
@@ -206,7 +286,6 @@ export default function ManualRigPanel({
     }
   };
 
-  // 2. Fijar nuevos puntos de articulación sin revertir piel
   const handleApplyNewBonePositions = () => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length) return;
@@ -218,7 +297,6 @@ export default function ManualRigPanel({
       if (!skel) return;
 
       mesh.skeleton = skel;
-
       mesh.skeleton.bones.forEach((bone) => {
         bone.updateMatrixWorld(true);
       });
@@ -251,7 +329,6 @@ export default function ManualRigPanel({
     alert('🔒 ¡Huesos fijados con éxito! Poses y matrices actualizadas.');
   };
 
-  // 3. HORNEADO DE POSE T MANTENIENDO LOS HUESOS ALINEADOS (SIN QUE SE CAIGAN)
   const handleBakeCurrentPoseToMesh = () => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length || !bonesMap) {
@@ -281,7 +358,6 @@ export default function ManualRigPanel({
       const boneInverses = mesh.skeleton.boneInverses;
       const count = posAttr.count;
 
-      // 1. Hornear las coordenadas de los vértices en su postura actual
       for (let i = 0; i < count; i++) {
         tempVertex.fromBufferAttribute(posAttr, i);
         skinnedVertex.set(0, 0, 0);
@@ -305,12 +381,10 @@ export default function ManualRigPanel({
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
 
-      // 2. Conservar la posición de los huesos (NO hacer bone.rotation.set(0,0,0))
       bones.forEach((bone) => {
         bone.updateMatrixWorld(true);
       });
 
-      // 3. Fijar la postura actual de los huesos como nueva base de reposo estática
       mesh.skeleton.calculateInverses();
       mesh.bind(mesh.skeleton, mesh.matrixWorld);
     });
@@ -320,7 +394,6 @@ export default function ManualRigPanel({
     alert('🔥 ¡Pose T horneada! La malla y los huesos quedaron fijados y alineados.');
   };
 
-  // Cursor 3D
   useEffect(() => {
     const { scene } = getSceneContext();
     if (scene && !cursorMeshRef.current) {
@@ -365,7 +438,6 @@ export default function ManualRigPanel({
     }
   }, [brushSize]);
 
-  // Materiales térmicos
   useEffect(() => {
     const meshes = getSkinnedMeshes();
     if (!meshes.length) return;
@@ -411,7 +483,6 @@ export default function ManualRigPanel({
     };
   }, [selectedBoneName, currentModel, isEditMode]);
 
-  // Gizmo
   useEffect(() => {
     if (transformControls) {
       if (isLocked || (paintMode !== 'inspect' && !isEditMode)) {
@@ -422,7 +493,6 @@ export default function ManualRigPanel({
     }
   }, [isLocked, paintMode, selectedBoneName, bonesMap, transformControls, isEditMode]);
 
-  // Pintado
   useEffect(() => {
     const canvas = document.querySelector('canvas');
     if (!canvas) return;
@@ -595,6 +665,8 @@ export default function ManualRigPanel({
     };
   }, [currentModel, isEditMode]);
 
+  const currentUndoLength = undoCount ?? (Array.isArray(activeUndoStack) ? activeUndoStack.length : activeUndoStack.current?.length ?? 0);
+
   return (
     <div
       style={{
@@ -654,7 +726,7 @@ export default function ManualRigPanel({
         </button>
       </div>
 
-      {/* BOTONES PRINCIPALES: DESACOPLAR MALLA Y FIJAR BIND */}
+      {/* Desacoplar Malla y Fijar Huesos */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         <button
           onClick={toggleEditMode}
@@ -692,7 +764,7 @@ export default function ManualRigPanel({
         </button>
       </div>
 
-      {/* CONTROL DE TAMAÑO DE CABEZA INDEPENDIENTE */}
+      {/* TAMAÑO CABEZA */}
       <div style={{ marginBottom: 8, padding: 6, background: '#1e293b', borderRadius: 8, border: '1px solid #475569' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
           <span style={{ color: '#cbd5e1', fontWeight: 'bold' }}>👤 Tamaño Cabeza (Vértices):</span>
@@ -742,7 +814,59 @@ export default function ManualRigPanel({
         </div>
       </div>
 
-      {/* BOTÓN HORNEADO CPU DE POSE T (Mantiene brazos y huesos en su sitio) */}
+      {/* TAMAÑO BUSTO: SOLO VISIBLE SI EXISTEN HUESOS DE BUSTO */}
+      {hasBustBones && (
+        <div style={{ marginBottom: 8, padding: 6, background: '#1e293b', borderRadius: 8, border: '1px solid #db2777' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ color: '#f472b6', fontWeight: 'bold' }}>🎀 Tamaño Pecho (Vértices):</span>
+            <span style={{ color: '#ec4899' }}>{(bustScaleFactor * 100).toFixed(0)}%</span>
+          </div>
+          <input
+            type="range"
+            min="0.7"
+            max="1.6"
+            step="0.02"
+            value={bustScaleFactor}
+            onChange={(e) => setBustScaleFactor(Number(e.target.value))}
+            style={{ width: '100%', accentColor: '#ec4899' }}
+          />
+          <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+            <button
+              onClick={() => applyBustScale(bustScaleFactor)}
+              style={{
+                flex: 1,
+                background: '#db2777',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 4,
+                padding: '5px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              Ajustar Pecho
+            </button>
+            <button
+              onClick={() => {
+                setBustScaleFactor(1.0);
+                applyBustScale(1.0);
+              }}
+              style={{
+                background: '#334155',
+                color: '#94a3b8',
+                border: 'none',
+                borderRadius: 4,
+                padding: '5px 8px',
+                cursor: 'pointer'
+              }}
+            >
+              100%
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* HORNEAR POSE T */}
       <button
         onClick={handleBakeCurrentPoseToMesh}
         style={{
@@ -761,7 +885,7 @@ export default function ManualRigPanel({
         ❄️ Hornear Pose T Permanente
       </button>
 
-      {/* Selector de modo Pincel / Ver */}
+      {/* Pincel / Ver */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         <button
           onClick={() => {
@@ -821,24 +945,24 @@ export default function ManualRigPanel({
         </button>
       </div>
 
-      {/* Deshacer */}
+      {/* BOTÓN DESHACER (NUNCA SE REINICIA AL CERRAR EL PANEL) */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         <button
           onClick={handleUndo}
-          disabled={undoCount === 0}
+          disabled={currentUndoLength === 0}
           style={{
             width: '100%',
-            background: undoCount > 0 ? '#3b82f6' : '#1e293b',
+            background: currentUndoLength > 0 ? '#3b82f6' : '#1e293b',
             color: '#fff',
             border: '1px solid #475569',
             borderRadius: 6,
             padding: '6px 4px',
-            cursor: undoCount > 0 ? 'pointer' : 'not-allowed',
-            opacity: undoCount > 0 ? 1 : 0.4,
+            cursor: currentUndoLength > 0 ? 'pointer' : 'not-allowed',
+            opacity: currentUndoLength > 0 ? 1 : 0.4,
             fontWeight: 'bold'
           }}
         >
-          ↩️ Deshacer ({undoCount})
+          ↩️ Deshacer ({currentUndoLength})
         </button>
       </div>
 
